@@ -87,7 +87,7 @@ with st.sidebar:
     show_labels = st.checkbox("Show player labels", value=True)
     min_minutes = st.slider("Minimum minutes", 0, 1000, 0, 10)
     use_player_images = st.checkbox(
-        "Use Player Images",
+        "Use player images on chart (instead of dots)",
         value=False,
         help="Replaces scatter dots with each player's headshot from PlayerImages/"
     )
@@ -136,11 +136,21 @@ with st.sidebar:
     show_reg = st.checkbox("Show regression line", value=False)
     show_quad_lines = st.checkbox("Show quadrant lines", value=True)
 
+    # Track when lock changes so we can "snapshot" the current axes
+    if "lock_axes_prev" not in st.session_state:
+        st.session_state["lock_axes_prev"] = False
+
     lock_axes = st.checkbox(
         "Lock chart axis ranges",
-        value=False,
-        help="Keep x/y ranges fixed based on all players (after minutes filter), regardless of filters.",
+        value=st.session_state["lock_axes_prev"],
+        help="Lock the current X/Y ranges so later filters don't change them.",
     )
+
+    # Did the user just turn the lock ON this rerun?
+    lock_just_turned_on = lock_axes and (not st.session_state["lock_axes_prev"])
+
+    # Remember current lock state for next rerun
+    st.session_state["lock_axes_prev"] = lock_axes
 
     st.markdown("---")
     # Custom title / subtitle / axis labels / quadrant labels
@@ -316,6 +326,102 @@ st.session_state["y_stat_current"] = y_stat
 x_key = x_stat
 y_key = y_stat
 
+# === Optional: manually add custom players to the chart ===
+custom_players = []  # list of dicts we will use later when plotting
+
+with st.expander("Add custom players to chart", expanded=False):
+
+    # --- Global style controls for ALL custom players ---
+    custom_img_zoom = st.slider(
+        "Custom player image size (when using images)",
+        min_value=0.10,
+        max_value=0.60,
+        value=0.30,
+        step=0.02,
+    )
+
+    custom_dot_size = st.slider(
+        "Custom player dot size",
+        min_value=40,
+        max_value=260,
+        value=140,
+        step=10,
+    )
+
+    custom_dot_color = st.color_picker(
+        "Custom player dot color",
+        value="#111111",
+    )
+
+    st.markdown("---")
+
+    n_custom = st.number_input(
+        "Number of custom players",
+        min_value=0,
+        max_value=10,
+        value=0,
+        step=1,
+        help="Custom players are visual only (not in the table/radar yet).",
+    )
+
+    for i in range(int(n_custom)):
+        st.markdown(f"**Custom player {i+1}**")
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            name = st.text_input(
+                f"Name (Player {i+1})",
+                value=f"Custom Player {i+1}",
+                key=f"cust_name_{i}",
+            )
+            x_val = st.number_input(
+                f"{x_key} (X-axis) – Player {i+1}",
+                value=0.0,
+                step=0.1,
+                key=f"cust_x_{i}",
+            )
+            y_val = st.number_input(
+                f"{y_key} (Y-axis) – Player {i+1}",
+                value=0.0,
+                step=0.1,
+                key=f"cust_y_{i}",
+            )
+            minutes = st.number_input(
+                f"Minutes – Player {i+1}",
+                min_value=0.0,
+                value=90.0,
+                step=10.0,
+                key=f"cust_min_{i}",
+            )
+
+        with col_b:
+            if "Pos" in df.columns:
+                pos = st.selectbox(
+                    f"Position – Player {i+1}",
+                    ["FW", "MF", "DF"],
+                    index=1,
+                    key=f"cust_pos_{i}",
+                )
+            else:
+                pos = None
+
+            img_file = st.file_uploader(
+                f"Headshot image (PNG/JPG) – Player {i+1}",
+                type=["png", "jpg", "jpeg"],
+                key=f"cust_img_{i}",
+            )
+
+        custom_players.append(
+            {
+                "name": name,
+                "x": x_val,
+                "y": y_val,
+                "minutes": minutes,
+                "pos": pos,
+                "img_file": img_file,
+            }
+        )
+
 # ==== Percentiles for ALL numeric stats (except Minutes) vs ALL Chelsea players (after minutes filter) ====
 for col in stat_candidates_all:
     if col in df.columns:
@@ -376,21 +482,9 @@ if plot_df.empty:
     st.warning("No rows after position/player filters. Adjust filters or removed players.")
     st.stop()
 
-# ==== Axis ranges (global vs plot-specific) ====
-# Global ranges from df (after minutes filter, before position/remove filters)
-x_all = pd.to_numeric(df[x_key], errors="coerce").to_numpy()
-y_all = pd.to_numeric(df[y_key], errors="coerce").to_numpy()
-valid_all = np.isfinite(x_all) & np.isfinite(y_all)
+# ==== Axis ranges (lock to current view when requested) ====
 
-if valid_all.sum() >= 1:
-    global_x_min = np.nanmin(x_all[valid_all])
-    global_x_max = np.nanmax(x_all[valid_all])
-    global_y_min = np.nanmin(y_all[valid_all])
-    global_y_max = np.nanmax(y_all[valid_all])
-else:
-    global_x_min = global_x_max = global_y_min = global_y_max = None
-
-# Plot-specific ranges
+# Plot-specific ranges based on the CURRENT filtered data
 x_vals_plot = pd.to_numeric(plot_df[x_key], errors="coerce").to_numpy()
 y_vals_plot = pd.to_numeric(plot_df[y_key], errors="coerce").to_numpy()
 valid_plot = np.isfinite(x_vals_plot) & np.isfinite(y_vals_plot)
@@ -399,14 +493,45 @@ if not np.any(valid_plot):
     st.warning("No valid x/y values to plot for current filters.")
     st.stop()
 
-if lock_axes and global_x_min is not None:
-    x_min_plot, x_max_plot = global_x_min, global_x_max
-    y_min_plot, y_max_plot = global_y_min, global_y_max
+# Dynamic ranges from current data (what you'd normally use)
+x_min_dynamic = np.nanmin(x_vals_plot[valid_plot])
+x_max_dynamic = np.nanmax(x_vals_plot[valid_plot])
+y_min_dynamic = np.nanmin(y_vals_plot[valid_plot])
+y_max_dynamic = np.nanmax(y_vals_plot[valid_plot])
+
+# Initialise stored locked ranges once
+if "locked_x_min" not in st.session_state:
+    st.session_state["locked_x_min"] = None
+    st.session_state["locked_x_max"] = None
+    st.session_state["locked_y_min"] = None
+    st.session_state["locked_y_max"] = None
+
+if lock_axes:
+    # If the user JUST turned lock on this rerun,
+    # snapshot the CURRENT dynamic ranges
+    if lock_just_turned_on or st.session_state["locked_x_min"] is None:
+        st.session_state["locked_x_min"] = x_min_dynamic
+        st.session_state["locked_x_max"] = x_max_dynamic
+        st.session_state["locked_y_min"] = y_min_dynamic
+        st.session_state["locked_y_max"] = y_max_dynamic
+
+    # Use the stored locked ranges regardless of later filters
+    x_min_plot = st.session_state["locked_x_min"]
+    x_max_plot = st.session_state["locked_x_max"]
+    y_min_plot = st.session_state["locked_y_min"]
+    y_max_plot = st.session_state["locked_y_max"]
 else:
-    x_min_plot = np.nanmin(x_vals_plot[valid_plot])
-    x_max_plot = np.nanmax(x_vals_plot[valid_plot])
-    y_min_plot = np.nanmin(y_vals_plot[valid_plot])
-    y_max_plot = np.nanmax(y_vals_plot[valid_plot])
+    # Unlocked: always use fresh dynamic ranges
+    x_min_plot = x_min_dynamic
+    x_max_plot = x_max_dynamic
+    y_min_plot = y_min_dynamic
+    y_max_plot = y_max_dynamic
+
+    # Clear any previously locked ranges so next lock starts fresh
+    st.session_state["locked_x_min"] = None
+    st.session_state["locked_x_max"] = None
+    st.session_state["locked_y_min"] = None
+    st.session_state["locked_y_max"] = None
 
 # Small padding
 x_pad = (x_max_plot - x_min_plot) * 0.05 if x_max_plot > x_min_plot else 0.1
@@ -480,24 +605,26 @@ for spine in ax.spines.values():
 dots_z = 10
 
 if use_player_images:
-    FIXED_ZOOM = 0.30   # adjust to taste (0.18–0.26 is a good range)
+    BASE_ZOOM = 0.30        # normal players (fixed)
+    CUSTOM_ZOOM = custom_img_zoom  # from the sidebar slider
 
     def crop_top_portion(arr, keep=0.60):
-        """Keep only the top `keep` fraction of the image (e.g., head/shoulders)."""
         h = arr.shape[0]
         k = max(1, int(h * keep))
         return arr[:k, :, :]
 
     matched, missing = 0, 0
+
+    # --- 1) CSV players (normal squad) ---
     for i, row in plot_df.iterrows():
         x, y = float(row[x_key]), float(row[y_key])
         img_path = get_player_image_path(str(row[label_col]))
 
         if img_path and img_path.exists():
             try:
-                arr = mpimg.imread(str(img_path))          # RGBA if PNG
-                arr = crop_top_portion(arr, keep=0.6137)   # top ~60% only
-                oi = OffsetImage(arr, zoom=FIXED_ZOOM)     # fixed size
+                arr = mpimg.imread(str(img_path))
+                arr = crop_top_portion(arr, keep=0.6137)
+                oi = OffsetImage(arr, zoom=BASE_ZOOM)   # <-- fixed zoom here
                 ab = AnnotationBbox(
                     oi, (x, y),
                     frameon=False,
@@ -509,16 +636,59 @@ if use_player_images:
                 ax.add_artist(ab)
                 matched += 1
             except Exception:
-                c = (color_series.iloc[i] if 'color_series' in locals() else "lightgray")
+                c = (color_series.iloc[i] if "color_series" in locals() else "lightgray")
                 ax.scatter([x], [y], s=36, c=[c], zorder=dots_z)
                 missing += 1
         else:
-            c = (color_series.iloc[i] if 'color_series' in locals() else "lightgray")
+            c = (color_series.iloc[i] if "color_series" in locals() else "lightgray")
             ax.scatter([x], [y], s=36, c=[c], zorder=dots_z)
             missing += 1
 
-    print(f"[Images] matched: {matched}, missing: {missing}, dir: {IMAGES_DIR}")
+    # --- 2) Custom players (use slider zoom) ---
+    for cp in custom_players:
+        if not cp["name"].strip():
+            continue
+
+        x, y = float(cp["x"]), float(cp["y"])
+        img_file = cp["img_file"]
+
+        if img_file is not None:
+            try:
+                arr = mpimg.imread(img_file)
+                arr = crop_top_portion(arr, keep=0.6137)
+                oi = OffsetImage(arr, zoom=CUSTOM_ZOOM)  # <-- slider only here
+                ab = AnnotationBbox(
+                    oi, (x, y),
+                    frameon=False,
+                    pad=0.0,
+                    box_alignment=(0.5, 0.5),
+                    zorder=dots_z + 1,
+                    clip_on=False,
+                )
+                ax.add_artist(ab)
+            except Exception:
+                ax.scatter(
+                    [x],
+                    [y],
+                    s=custom_dot_size,
+                    c=[custom_dot_color],
+                    edgecolors="black",
+                    linewidths=0.7,
+                    zorder=dots_z + 1,
+                )
+        else:
+            ax.scatter(
+                [x],
+                [y],
+                s=custom_dot_size,
+                c=[custom_dot_color],
+                edgecolors="black",
+                linewidths=0.7,
+                zorder=dots_z + 1,
+            )
+
 else:
+    # (unchanged) normal dot scatter for everyone
     ax.scatter(
         plot_df[x_key],
         plot_df[y_key],
@@ -529,7 +699,19 @@ else:
         linewidths=.55,
         zorder=dots_z,
     )
-
+    for cp in custom_players:
+        if not cp["name"].strip():
+            continue
+        x, y = float(cp["x"]), float(cp["y"])
+        ax.scatter(
+            [x],
+            [y],
+            s=custom_dot_size,
+            c=[custom_dot_color],
+            edgecolors="black",
+            linewidths=0.7,
+            zorder=dots_z + 1,
+        )
 if reverse_x:
     ax.invert_xaxis()
 if reverse_y:
@@ -691,6 +873,41 @@ if show_labels and not use_player_images:
                 alpha=label_box_alpha,
             ),
         )
+    # === Labels for custom players (same style) ===
+    for cp in custom_players:
+        if not cp["name"].strip():
+            continue
+
+        x, y = float(cp["x"]), float(cp["y"])
+
+        # Split the name for two-line formatting
+        full_name = cp["name"].strip().split()
+        if len(full_name) >= 2:
+            first_name = full_name[0]
+            last_name = " ".join(full_name[1:])
+        else:
+            first_name = full_name[0]
+            last_name = ""
+
+        ax.annotate(
+            f"{first_name}\n{last_name}",
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, 20),
+            fontsize=11,
+            fontproperties=golos_font,
+            color=label_color,
+            va="center",
+            ha="center",
+            zorder=21,  # draw above normal players
+            bbox=dict(
+                boxstyle="round,pad=0.13",
+                edgecolor="#FFFFFF",
+                facecolor="#FCFCFA",
+                linewidth=0.8,
+                alpha=0.25
+            )
+        )
 
 # Regression line (optional)
 if show_reg and len(plot_df) >= 2:
@@ -787,6 +1004,12 @@ else:
 ax.spines["left"].set_color(spine_col)
 ax.spines["bottom"].set_color(spine_col)
 
+# Ticks
+ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=9))
+ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=6))
+ax.tick_params(axis="both", length=0)   # remove ticks
+ax.tick_params(axis="both", colors="#3A3A3A")  # keep axis numbers dark gray
+
 # Tick labels
 ax.tick_params(axis="both", labelsize=11.1, colors=tick_col, length=0)
 ax.tick_params(axis="x", pad=6)
@@ -801,16 +1024,16 @@ y_label_final = custom_y_label.strip() if custom_y_label.strip() else y_key
 
 ax.set_xlabel(
     x_label_final,
-    fontsize=18.4,
-    fontproperties=hovesmedium_font,
+    fontsize=19.9,
+    fontproperties=hovesbold_font,
     color=label_color,
     labelpad=14.5,
 )
 
 ax.set_ylabel(
     y_label_final,
-    fontsize=18,
-    fontproperties=hovesmedium_font,
+    fontsize=19.4,
+    fontproperties=hovesbold_font,
     color=label_color,
     labelpad=5,
 )
@@ -840,7 +1063,7 @@ watermark = "@sambrazy"
 fig.text(
     0.5, 0.97,
     main_title,
-    fontsize=32,
+    fontsize=40,
     fontproperties=hovesbold_font,
     ha="center",
     color=label_color,
