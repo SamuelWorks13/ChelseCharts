@@ -87,7 +87,7 @@ with st.sidebar:
     show_labels = st.checkbox("Show player labels", value=True)
     min_minutes = st.slider("Minimum minutes", 0, 1000, 0, 10)
     use_player_images = st.checkbox(
-        "Use player images on chart (instead of dots)",
+        "Use Player Images",
         value=False,
         help="Replaces scatter dots with each player's headshot from PlayerImages/"
     )
